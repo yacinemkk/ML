@@ -382,6 +382,9 @@ def generate_adversarial_samples(base_models, X_train, y_train, X_test, y_test,
                                 
         # Collect per-class for XGBoost (or best model)
         if name == "XGBoost":
+            print(f"\n  Classification Report under Attack for {name}:")
+            print(classification_report(y_sample, y_pred_a, target_names=label_classes, zero_division=0))
+            
             rep_c = classification_report(y_sample, y_pred_c, output_dict=True, zero_division=0)
             rep_a = classification_report(y_sample, y_pred_a, output_dict=True, zero_division=0)
             for i, cls in enumerate(label_classes):
@@ -676,6 +679,9 @@ def evaluate(model, X_test, y_test, name, label_classes=None):
     
     per_class = {}
     if label_classes is not None:
+        print(f"\n[Classification Report for {name}]")
+        print(classification_report(y_test, y_pred, target_names=label_classes, zero_division=0))
+        
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
         for i, cls in enumerate(label_classes):
             idx = str(i)
