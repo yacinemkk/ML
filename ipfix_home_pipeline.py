@@ -252,10 +252,11 @@ def train_base_classifiers(models, X_train, y_train, X_test, y_test, label_class
     # Save summary
     df_res = pd.DataFrame([{k: v for k, v in r.items() if k != 'per_class'} for r in results])
     df_res.to_csv(os.path.join(OUTPUT_PATH, "step2_base_identification_results.csv"), index=False)
-    
-    # Plot Figure 5
-    plot_figure_5(results, label_classes)
-    
+
+    # CORRECTION 2 : Plot Figure 5 for EACH model (not just XGBoost)
+    for r in results:
+        plot_figure_5(r, label_classes)
+
     return trained
 
 
@@ -343,6 +344,11 @@ class AdversarialAttackGenerator:
 
 def generate_adversarial_samples(base_models, X_train, y_train, X_test, y_test,
                                  feature_names, label_classes, n_adv=5000):
+    """
+    CORRECTION 3 – Séparation train/test pour éviter le Data Leakage :
+      - X_adv_train : générés depuis X_train (pour entraîner les modèles robustes à l'étape 5)
+      - X_adv_test  : générés depuis X_test  (pour l'évaluation uniquement, étapes 3 et 6)
+    """
     print("\n" + "=" * 60)
     print("STEP 3 – Adversarial Attack Generation (Section 4.2)")
     print("=" * 60)
@@ -351,55 +357,78 @@ def generate_adversarial_samples(base_models, X_train, y_train, X_test, y_test,
     atk = AdversarialAttackGenerator(feature_names)
     atk.fit_centroids(X_train, y_train)
 
-    X_sample = X_test[:n_adv]
-    y_sample = y_test[:n_adv]
+    # ── Adversarial TEST samples (pour mesurer l'impact & l'évaluation finale) ──
+    X_test_sample = X_test[:n_adv]
+    y_test_sample = y_test[:n_adv]
+    print(f"\n  Generating {n_adv} adversarial TEST samples (from X_test) ...")
+    X_adv_test = atk.generate_batch(X_test_sample, y_test_sample)
 
-    # Generate adversarial test samples (used to evaluate all 4 models)
-    print(f"\n  Generating {n_adv} adversarial samples ...")
-    X_adv = atk.generate_batch(X_sample, y_sample)
+    # ── Adversarial TRAIN samples (pour entraîner les modèles robustes – CORRECTION 3) ──
+    n_adv_train = min(n_adv, int(len(X_train) * 0.30))  # 30 % de X_train
+    idx_train = np.random.choice(len(X_train), n_adv_train, replace=False)
+    X_train_sub = X_train[idx_train]
+    y_train_sub = y_train[idx_train]
+    print(f"  Generating {n_adv_train} adversarial TRAIN samples (from X_train, 30%) ...")
+    X_adv_train = atk.generate_batch(X_train_sub, y_train_sub)
 
-    # Measure adversarial impact on all 4 base models
+    # ── Measure adversarial impact on all 4 base models (on test set only) ──
     print("\n  Adversarial Impact on Base Models:")
     impact_results = []
-    
-    # For per-class plotting
-    per_class_f1_clean = {}
-    per_class_f1_adv = {}
-    
+
+    # CORRECTION 1 & 2 : métriques complètes + Figure 7 pour CHAQUE modèle
+    per_class_results = {}   # {model_name: {"clean": {cls: f1}, "adv": {cls: f1}}}
+
+    from sklearn.metrics import accuracy_score
     for name, model in base_models.items():
-        # Clean evals
-        y_pred_c = _predict(model, X_sample)
-        f1_clean = f1_score(y_sample, y_pred_c, average="weighted", zero_division=0)
-        
-        # Adv evals
-        y_pred_a = _predict(model, X_adv)
-        f1_adv = f1_score(y_sample, y_pred_a, average="weighted", zero_division=0)
-        
+        # Clean predictions
+        y_pred_c = _predict(model, X_test_sample)
+        acc_clean = accuracy_score(y_test_sample, y_pred_c)
+        f1_clean  = f1_score(y_test_sample, y_pred_c, average="weighted", zero_division=0)
+        pr_clean  = precision_score(y_test_sample, y_pred_c, average="weighted", zero_division=0)
+        rc_clean  = recall_score(y_test_sample, y_pred_c, average="weighted", zero_division=0)
+
+        # Adversarial predictions
+        y_pred_a = _predict(model, X_adv_test)
+        acc_adv  = accuracy_score(y_test_sample, y_pred_a)
+        f1_adv   = f1_score(y_test_sample, y_pred_a, average="weighted", zero_division=0)
+        pr_adv   = precision_score(y_test_sample, y_pred_a, average="weighted", zero_division=0)
+        rc_adv   = recall_score(y_test_sample, y_pred_a, average="weighted", zero_division=0)
+
         drop = f1_clean - f1_adv
-        print(f"    {name:10s} | F1_clean={f1_clean:.4f}  F1_adv={f1_adv:.4f}  Drop={drop:.4f}")
-        impact_results.append({"model": name, "f1_clean": f1_clean,
-                                "f1_adv": f1_adv, "drop": drop})
-                                
-        # Collect per-class for XGBoost (or best model)
-        if name == "XGBoost":
-            print(f"\n  Classification Report under Attack for {name}:")
-            print(classification_report(y_sample, y_pred_a, target_names=label_classes, zero_division=0))
-            
-            rep_c = classification_report(y_sample, y_pred_c, output_dict=True, zero_division=0)
-            rep_a = classification_report(y_sample, y_pred_a, output_dict=True, zero_division=0)
-            for i, cls in enumerate(label_classes):
-                idx = str(i)
-                per_class_f1_clean[cls] = rep_c[idx]['f1-score'] if idx in rep_c else 0.0
-                per_class_f1_adv[cls]   = rep_a[idx]['f1-score'] if idx in rep_a else 0.0
+        print(f"    {name:10s} | Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
+              f"Acc_adv={acc_adv:.4f}  F1_adv={f1_adv:.4f}  Drop={drop:.4f}")
+
+        print(f"\n  Classification Report under Attack for {name}:")
+        print(classification_report(y_test_sample, y_pred_a, target_names=label_classes, zero_division=0))
+
+        # Per-class F1 for Figure 7 (CORRECTION 2 : pour tous les modèles)
+        rep_c = classification_report(y_test_sample, y_pred_c, output_dict=True, zero_division=0)
+        rep_a = classification_report(y_test_sample, y_pred_a, output_dict=True, zero_division=0)
+        pc_clean, pc_adv = {}, {}
+        for i, cls in enumerate(label_classes):
+            idx = str(i)
+            pc_clean[cls] = rep_c[idx]['f1-score'] if idx in rep_c else 0.0
+            pc_adv[cls]   = rep_a[idx]['f1-score'] if idx in rep_a else 0.0
+        per_class_results[name] = {"clean": pc_clean, "adv": pc_adv}
+
+        impact_results.append({
+            "model": name,
+            "accuracy_clean": acc_clean, "precision_clean": pr_clean,
+            "recall_clean": rc_clean,    "f1_clean": f1_clean,
+            "accuracy_adv":  acc_adv,   "precision_adv": pr_adv,
+            "recall_adv":    rc_adv,     "f1_adv": f1_adv,
+            "drop": drop,
+        })
 
     pd.DataFrame(impact_results).to_csv(
         os.path.join(OUTPUT_PATH, "step3_adversarial_impact.csv"), index=False
     )
-    
-    # Plot Figure 7
-    plot_figure_7(per_class_f1_clean, per_class_f1_adv, label_classes)
-    
-    return X_adv, X_sample, y_sample, atk
+
+    # CORRECTION 2 : Figure 7 pour chaque modèle
+    for name, pc in per_class_results.items():
+        plot_figure_7(pc["clean"], pc["adv"], label_classes, model_name=name)
+
+    return X_adv_test, X_adv_train, y_train_sub, X_test_sample, y_test_sample, atk
 
 
 # ─────────────────────────────────────────────
@@ -519,28 +548,30 @@ def build_robust_classifiers(num_classes, n_features):
 
 
 def train_robust_classifiers(base_models, X_train, y_train,
-                              X_adv, y_adv_true,
-                              X_test, y_test, num_classes, n_features):
+                              X_adv_train, y_adv_train_true,
+                              X_adv_test, X_test_sample, y_test_sample,
+                              num_classes, n_features):
+    """
+    CORRECTION 3 – Entraîne les modèles robustes UNIQUEMENT avec X_adv_train
+    (généré depuis X_train), jamais depuis X_test → pas de Data Leakage.
+    L'évaluation utilise X_adv_test (généré depuis X_test).
+    """
     print("\n" + "=" * 60)
     print("STEP 5 – Adversarial Training / Robust Classifiers (Model-2, Table 5)")
     print("=" * 60)
 
-    # Joint corpus: clean training data + adversarial samples with true labels
-    X_robust = np.vstack([X_train, X_adv])
-    y_robust  = np.hstack([y_train, y_adv_true])
-    print(f"  Robust training set size: {len(X_robust)} samples")
+    # Joint corpus: clean training data + adversarial TRAIN samples
+    X_robust = np.vstack([X_train, X_adv_train])
+    y_robust  = np.hstack([y_train, y_adv_train_true])
+    print(f"  Robust training set size: {len(X_robust)} samples "
+          f"(X_train={len(X_train)} + X_adv_train={len(X_adv_train)})")
 
     robust_models = build_robust_classifiers(num_classes, n_features)
     trained_robust = {}
     rob_results = []
     es = EarlyStopping(patience=3, restore_best_weights=True)
 
-    # Sample of test set matching adversarial samples (same indices as X_adv)
-    n_adv = len(X_adv)
-    X_test_sample = X_test[:n_adv]
-    y_test_sample = y_test[:n_adv]
-    X_adv_test = X_adv  # same adversarial set used for evaluation
-
+    from sklearn.metrics import accuracy_score
     for name, model in robust_models.items():
         print(f"\n  Training Robust {name} ...")
         if name == "DNN":
@@ -554,17 +585,34 @@ def train_robust_classifiers(base_models, X_train, y_train,
 
         trained_robust[name] = model
 
-        f1_clean = f1_score(y_test_sample, _predict(model, X_test_sample), average="weighted")
-        f1_adv   = f1_score(y_test_sample, _predict(model, X_adv_test),    average="weighted")
-        f1_base  = f1_score(y_test_sample,
-                            _predict(base_models[name], X_adv_test), average="weighted")
+        # CORRECTION 1 : toutes les métriques (Accuracy, Precision, Recall, F1)
+        y_pred_clean = _predict(model, X_test_sample)
+        y_pred_adv   = _predict(model, X_adv_test)
+        y_pred_base  = _predict(base_models[name], X_adv_test)
+
+        acc_clean = accuracy_score(y_test_sample, y_pred_clean)
+        f1_clean  = f1_score(y_test_sample, y_pred_clean, average="weighted", zero_division=0)
+        pr_clean  = precision_score(y_test_sample, y_pred_clean, average="weighted", zero_division=0)
+        rc_clean  = recall_score(y_test_sample, y_pred_clean, average="weighted", zero_division=0)
+
+        acc_adv = accuracy_score(y_test_sample, y_pred_adv)
+        f1_adv  = f1_score(y_test_sample, y_pred_adv, average="weighted", zero_division=0)
+        pr_adv  = precision_score(y_test_sample, y_pred_adv, average="weighted", zero_division=0)
+        rc_adv  = recall_score(y_test_sample, y_pred_adv, average="weighted", zero_division=0)
+
+        f1_base  = f1_score(y_test_sample, y_pred_base, average="weighted", zero_division=0)
         recovery = (f1_adv / f1_clean * 100) if f1_clean > 0 else 0
-        print(f"    {name:10s} | F1_clean={f1_clean:.4f}  F1_adv_before={f1_base:.4f}"
-              f"  F1_adv_after={f1_adv:.4f}  Recovery={recovery:.1f}%")
+
+        print(f"    {name:10s} | Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
+              f"F1_adv_before={f1_base:.4f}  Acc_adv={acc_adv:.4f}  "
+              f"F1_adv_after={f1_adv:.4f}  Recovery={recovery:.1f}%")
         rob_results.append({
-            "model": name, "f1_clean": f1_clean,
+            "model": name,
+            "accuracy_clean": acc_clean, "precision_clean": pr_clean,
+            "recall_clean":   rc_clean,   "f1_clean":        f1_clean,
+            "accuracy_adv":   acc_adv,    "precision_adv":   pr_adv,
+            "recall_adv":     rc_adv,     "f1_adv_after_robust": f1_adv,
             "f1_adv_before_robust": f1_base,
-            "f1_adv_after_robust": f1_adv,
             "recovery_pct": recovery,
         })
 
@@ -580,17 +628,21 @@ def train_robust_classifiers(base_models, X_train, y_train,
 
 def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
                                    X_test_clean, y_test_clean,
-                                   X_adv, y_adv_true):
+                                   X_adv_test, y_adv_true):
     """
     Pipeline (Figure 4):
       Incoming flow → Model-1 (Detector)
         → Flagged as adversarial → classify with Model-2 (Robust classifier)
         → Flagged as benign     → classify with Model-3 (Base classifier)
+
+    CORRECTION 3 : X_adv_test provient uniquement de X_test (pas de Data Leakage).
+    CORRECTION 1 : métriques complètes (Accuracy, Precision, Recall, F1) dans les résultats.
     """
     print("\n" + "=" * 60)
     print("STEP 6 – Two-Tiered Defense Evaluation (Figure 4)")
     print("=" * 60)
 
+    from sklearn.metrics import accuracy_score
     pipeline_results = []
 
     for det_name, detector in detector_models.items():
@@ -602,11 +654,11 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
         else:
             det_clean = detector.predict(X_test_clean)
 
-        # ── Evaluate on ADVERSARIAL test samples ──
+        # ── Evaluate on ADVERSARIAL test samples (CORRECTION 3 : X_adv_test isolé) ──
         if det_name == "DNN":
-            det_adv = (detector.predict(X_adv) > 0.5).astype(int).flatten()
+            det_adv = (detector.predict(X_adv_test) > 0.5).astype(int).flatten()
         else:
-            det_adv = detector.predict(X_adv)
+            det_adv = detector.predict(X_adv_test)
 
         for cls_name in base_models:
             base_model   = base_models[cls_name]
@@ -618,42 +670,54 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
                 _predict(base_model, X_test_clean),      # benign → Model-3
                 _predict(robust_model, X_test_clean),    # flagged → Model-2
             )
-            f1_clean = f1_score(y_test_clean, y_pred_clean, average="weighted")
+            # CORRECTION 1 : toutes les métriques sur les données clean
+            acc_clean = accuracy_score(y_test_clean, y_pred_clean)
+            f1_clean  = f1_score(y_test_clean, y_pred_clean, average="weighted", zero_division=0)
+            pr_clean  = precision_score(y_test_clean, y_pred_clean, average="weighted", zero_division=0)
+            rc_clean  = recall_score(y_test_clean, y_pred_clean, average="weighted", zero_division=0)
 
             # ── Adversarial samples through pipeline ──
             y_pred_adv = np.where(
                 det_adv == 0,
-                _predict(base_model, X_adv),             # not detected → Model-3
-                _predict(robust_model, X_adv),           # detected     → Model-2
+                _predict(base_model, X_adv_test),        # not detected → Model-3
+                _predict(robust_model, X_adv_test),      # detected     → Model-2
             )
-            f1_adv = f1_score(y_adv_true, y_pred_adv, average="weighted")
+            # CORRECTION 1 : toutes les métriques sur les données adversariales
+            acc_adv = accuracy_score(y_adv_true, y_pred_adv)
+            f1_adv  = f1_score(y_adv_true, y_pred_adv, average="weighted", zero_division=0)
+            pr_adv  = precision_score(y_adv_true, y_pred_adv, average="weighted", zero_division=0)
+            rc_adv  = recall_score(y_adv_true, y_pred_adv, average="weighted", zero_division=0)
 
-            # F1 under attack with NO defense (baseline)
+            # Baseline : F1 without defense
             f1_no_defense = f1_score(y_adv_true,
-                                     _predict(base_model, X_adv), average="weighted")
+                                     _predict(base_model, X_adv_test), average="weighted",
+                                     zero_division=0)
             recovery = (f1_adv / f1_no_defense * 100) if f1_no_defense > 0 else 0
 
             print(f"    Classifier={cls_name:10s} | "
-                  f"F1_clean={f1_clean:.4f}  "
+                  f"Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
                   f"F1_adv_nodefense={f1_no_defense:.4f}  "
-                  f"F1_adv_defended={f1_adv:.4f}  "
+                  f"Acc_adv={acc_adv:.4f}  F1_adv_defended={f1_adv:.4f}  "
                   f"Recovery={recovery:.1f}%")
 
             pipeline_results.append({
                 "detector": det_name, "classifier": cls_name,
-                "f1_clean": f1_clean,
+                "accuracy_clean": acc_clean, "precision_clean": pr_clean,
+                "recall_clean":   rc_clean,   "f1_clean":        f1_clean,
+                "accuracy_adv":   acc_adv,    "precision_adv":   pr_adv,
+                "recall_adv":     rc_adv,
                 "f1_adv_no_defense": f1_no_defense,
-                "f1_adv_defended": f1_adv,
-                "recovery_pct": recovery,
+                "f1_adv_defended":   f1_adv,
+                "recovery_pct":      recovery,
             })
 
     df_res = pd.DataFrame(pipeline_results)
     df_res.to_csv(os.path.join(OUTPUT_PATH, "step6_twotiered_defense_results.csv"), index=False)
     print(f"\n  Results saved to {OUTPUT_PATH}")
-    
-    # Plot Figure 10 (Using results from the best detector, e.g. DNN)
+
+    # Plot Figure 10
     plot_figure_10(df_res)
-    
+
     return df_res
 
 
@@ -698,51 +762,60 @@ def evaluate(model, X_test, y_test, name, label_classes=None):
 # PLOTTING UTILITIES FOR PAPER FIGURES
 # ─────────────────────────────────────────────
 
-def plot_figure_5(results, label_classes):
-    """Figure 5: IoT Device Identification Scores in IoT IPFIX Home."""
-    # We will plot the Precision, Recall, and F1 of the best performing model (e.g., XGBoost)
-    xgb_res = next((r for r in results if r["model"] == "XGBoost"), None)
-    if not xgb_res or not xgb_res["per_class"]: return
-    
-    metrics = xgb_res["per_class"]
+def plot_figure_5(result, label_classes):
+    """
+    Figure 5: IoT Device Identification Scores in IoT IPFIX Home.
+    CORRECTION 2 : prend un seul résultat de modèle (dict) et génère une image par modèle.
+    """
+    name = result.get("model", "Unknown")
+    if not result.get("per_class"):
+        return
+
+    metrics = result["per_class"]
     df_plot = pd.DataFrame(metrics).T
-    
+
     plt.figure(figsize=(14, 6))
     x = np.arange(len(label_classes))
     width = 0.25
-    
-    plt.bar(x - width, df_plot["precision"]*100, width, label='Precision')
-    plt.bar(x, df_plot["recall"]*100, width, label='Recall')
-    plt.bar(x + width, df_plot["f1"]*100, width, label='F1-Score')
-    
+
+    plt.bar(x - width, df_plot["precision"] * 100, width, label='Precision')
+    plt.bar(x,          df_plot["recall"]    * 100, width, label='Recall')
+    plt.bar(x + width,  df_plot["f1"]        * 100, width, label='F1-Score')
+
     plt.xlabel('IoT Devices')
     plt.ylabel('Score (%)')
-    plt.title('Figure 5: IoT Device Identification Scores in IoT IPFIX Home (XGBoost)')
+    plt.title(f'Figure 5: IoT Device Identification Scores in IoT IPFIX Home ({name})')
     plt.xticks(x, label_classes, rotation=45, ha="right")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_PATH, 'Figure_5_Device_Identification.png'))
+    plt.savefig(os.path.join(OUTPUT_PATH, f'Figure_5_Device_Identification_{name}.png'))
     plt.close()
 
-def plot_figure_7(clean_f1, adv_f1, label_classes):
-    """Figure 7: Adversarial effect on IoT IPFIX Home identification device."""
+
+def plot_figure_7(clean_f1, adv_f1, label_classes, model_name=""):
+    """
+    Figure 7: Adversarial effect on IoT IPFIX Home identification device.
+    CORRECTION 2 : génère une image par modèle (model_name).
+    """
     plt.figure(figsize=(14, 6))
     x = np.arange(len(label_classes))
     width = 0.35
-    
-    c_f1 = [clean_f1[cls]*100 for cls in label_classes]
-    a_f1 = [adv_f1[cls]*100 for cls in label_classes]
-    
-    plt.bar(x - width/2, c_f1, width, label='Clean F1-Score', color='blue')
-    plt.bar(x + width/2, a_f1, width, label='Adversarial F1-Score', color='red')
-    
+
+    c_f1 = [clean_f1.get(cls, 0.0) * 100 for cls in label_classes]
+    a_f1 = [adv_f1.get(cls, 0.0)   * 100 for cls in label_classes]
+
+    plt.bar(x - width / 2, c_f1, width, label='Clean F1-Score',       color='blue')
+    plt.bar(x + width / 2, a_f1, width, label='Adversarial F1-Score', color='red')
+
     plt.xlabel('IoT Devices')
     plt.ylabel('F1-Score (%)')
-    plt.title('Figure 7: Adversarial effect on IoT IPFIX Home identification device (XGBoost)')
+    suffix = f" ({model_name})" if model_name else ""
+    plt.title(f'Figure 7: Adversarial effect on IoT IPFIX Home identification device{suffix}')
     plt.xticks(x, label_classes, rotation=45, ha="right")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_PATH, 'Figure_7_Adversarial_Effect.png'))
+    fname = f'Figure_7_Adversarial_Effect_{model_name}.png' if model_name else 'Figure_7_Adversarial_Effect.png'
+    plt.savefig(os.path.join(OUTPUT_PATH, fname))
     plt.close()
 
 def plot_figure_9(det_results):
@@ -815,33 +888,44 @@ def main():
     )
     print(f"\n  Train: {X_train.shape[0]:,}  |  Test: {X_test.shape[0]:,}")
     n_features = X_train.shape[1]
+    label_classes = list(label_encoder.classes_)
 
     # ── Step 2: Base Classifiers (Model-3) ─────────────────────
-    base_models_cfg  = build_base_classifiers(num_classes, n_features)
-    base_models      = train_base_classifiers(base_models_cfg, X_train, y_train, X_test, y_test, list(label_encoder.classes_))
+    base_models_cfg = build_base_classifiers(num_classes, n_features)
+    base_models     = train_base_classifiers(
+        base_models_cfg, X_train, y_train, X_test, y_test, label_classes
+    )
 
     # ── Step 3: Adversarial Attack Generation ──────────────────
+    # CORRECTION 3 : génère X_adv_test (eval) ET X_adv_train (robustness training)
     N_ADV = min(5000, len(X_test) // 4)
-    X_adv, X_sample, y_sample, attacker = generate_adversarial_samples(
-        base_models, X_train, y_train, X_test, y_test, feature_names, list(label_encoder.classes_), n_adv=N_ADV
+    X_adv_test, X_adv_train, y_adv_train_true, X_test_sample, y_test_sample, attacker = (
+        generate_adversarial_samples(
+            base_models, X_train, y_train, X_test, y_test,
+            feature_names, label_classes, n_adv=N_ADV
+        )
     )
 
     # ── Step 4: Train Detectors (Model-1, Table 4) ─────────────
+    # Le détecteur utilise X_adv_test pour construire son jeu de détection
     detector_models = train_detectors(
-        X_train, y_train, X_adv, X_sample, n_features
+        X_train, y_train, X_adv_test, X_test_sample, n_features
     )
 
     # ── Step 5: Adversarial Training (Model-2, Table 5) ────────
+    # CORRECTION 3 : entraîné avec X_adv_train (depuis X_train), évalué sur X_adv_test
     robust_models = train_robust_classifiers(
         base_models, X_train, y_train,
-        X_adv, y_sample,
-        X_test, y_test, num_classes, n_features
+        X_adv_train, y_adv_train_true,
+        X_adv_test, X_test_sample, y_test_sample,
+        num_classes, n_features
     )
 
     # ── Step 6: Two-Tiered Defense Evaluation (Figure 4) ───────
+    # CORRECTION 3 : X_test_sample (clean) vs X_adv_test (adversarial)
     two_tiered_defense_evaluation(
         base_models, detector_models, robust_models,
-        X_sample, y_sample, X_adv, y_sample
+        X_test_sample, y_test_sample, X_adv_test, y_test_sample
     )
 
     print("\n" + "=" * 60)
