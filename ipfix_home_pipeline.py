@@ -47,7 +47,7 @@ tf.random.set_seed(42)
 # ─────────────────────────────────────────────
 
 DATA_PATH   = "/content/drive/MyDrive/PFE/IPFIX_ML_Instances/"
-OUTPUT_PATH = "/content/drive/MyDrive/PFE/results/"
+OUTPUT_PATH = "/content/drive/MyDrive/results_ml_avc/"
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 
 SAMPLE_RATIO = 1.0   # <1.0 for quick testing
