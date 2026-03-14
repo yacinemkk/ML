@@ -27,7 +27,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score, precision_score, recall_score, classification_report
+from sklearn.metrics import f1_score, precision_score, recall_score, classification_report, accuracy_score, confusion_matrix
 import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -253,7 +253,7 @@ def train_base_classifiers(models, X_train, y_train, X_test, y_test, label_class
     df_res = pd.DataFrame([{k: v for k, v in r.items() if k != 'per_class'} for r in results])
     df_res.to_csv(os.path.join(OUTPUT_PATH, "step2_base_identification_results.csv"), index=False)
 
-    # CORRECTION 2 : Plot Figure 5 for EACH model (not just XGBoost)
+    # CORRECTION 2 : Plot Figure 5 for EACH model
     for r in results:
         plot_figure_5(r, label_classes)
 
@@ -378,7 +378,6 @@ def generate_adversarial_samples(base_models, X_train, y_train, X_test, y_test,
     # CORRECTION 1 & 2 : métriques complètes + Figure 7 pour CHAQUE modèle
     per_class_results = {}   # {model_name: {"clean": {cls: f1}, "adv": {cls: f1}}}
 
-    from sklearn.metrics import accuracy_score
     for name, model in base_models.items():
         # Clean predictions
         y_pred_c = _predict(model, X_test_sample)
@@ -395,11 +394,27 @@ def generate_adversarial_samples(base_models, X_train, y_train, X_test, y_test,
         rc_adv   = recall_score(y_test_sample, y_pred_a, average="weighted", zero_division=0)
 
         drop = f1_clean - f1_adv
-        print(f"    {name:10s} | Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
-              f"Acc_adv={acc_adv:.4f}  F1_adv={f1_adv:.4f}  Drop={drop:.4f}")
+        print(f"    {name:10s} | Clean: Acc={acc_clean:.4f} Pr={pr_clean:.4f} Rc={rc_clean:.4f} F1={f1_clean:.4f} | "
+              f"Adv: Acc={acc_adv:.4f} Pr={pr_adv:.4f} Rc={rc_adv:.4f} F1={f1_adv:.4f} | Drop={drop:.4f}")
 
+        cr_adv = classification_report(y_test_sample, y_pred_a, target_names=label_classes, zero_division=0)
         print(f"\n  Classification Report under Attack for {name}:")
-        print(classification_report(y_test_sample, y_pred_a, target_names=label_classes, zero_division=0))
+        print(cr_adv)
+        
+        with open(os.path.join(OUTPUT_PATH, f"classification_report_adv_{name}.txt"), "w", encoding="utf-8") as f:
+            f.write(f"[Classification Report under Attack for {name}]\n")
+            f.write(cr_adv)
+            
+        cm_adv = confusion_matrix(y_test_sample, y_pred_a)
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(cm_adv, annot=True, fmt='d', cmap='Reds', xticklabels=label_classes, yticklabels=label_classes)
+        plt.title(f'Adversarial Confusion Matrix - {name}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_PATH, f"confusion_matrix_adv_{name}.png"))
+        plt.close()
 
         # Per-class F1 for Figure 7 (CORRECTION 2 : pour tous les modèles)
         rep_c = classification_report(y_test_sample, y_pred_c, output_dict=True, zero_division=0)
@@ -498,12 +513,13 @@ def train_detectors(X_train, y_train_device,  # clean training data
             with open(os.path.join(OUTPUT_PATH, f"model1_{name.lower()}_detector.pkl"), "wb") as f:
                 pickle.dump(model, f)
 
+        acc = accuracy_score(y_det_ts, y_pred)
         f1 = f1_score(y_det_ts, y_pred, average="binary", zero_division=0)
         pr = precision_score(y_det_ts, y_pred, average="binary", zero_division=0)
         rc = recall_score(y_det_ts, y_pred, average="binary", zero_division=0)
-        print(f"    {name:10s} | F1={f1:.4f}  Precision={pr:.4f}  Recall={rc:.4f}")
+        print(f"    {name:10s} | Acc={acc:.4f} F1={f1:.4f} Precision={pr:.4f} Recall={rc:.4f}")
         trained_detectors[name] = model
-        det_results.append({"model": name, "f1": f1, "precision": pr, "recall": rc})
+        det_results.append({"model": name, "accuracy": acc, "f1": f1, "precision": pr, "recall": rc})
 
     pd.DataFrame(det_results).to_csv(
         os.path.join(OUTPUT_PATH, "step4_detector_results.csv"), index=False
@@ -571,7 +587,6 @@ def train_robust_classifiers(base_models, X_train, y_train,
     rob_results = []
     es = EarlyStopping(patience=3, restore_best_weights=True)
 
-    from sklearn.metrics import accuracy_score
     for name, model in robust_models.items():
         print(f"\n  Training Robust {name} ...")
         if name == "DNN":
@@ -603,9 +618,8 @@ def train_robust_classifiers(base_models, X_train, y_train,
         f1_base  = f1_score(y_test_sample, y_pred_base, average="weighted", zero_division=0)
         recovery = (f1_adv / f1_clean * 100) if f1_clean > 0 else 0
 
-        print(f"    {name:10s} | Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
-              f"F1_adv_before={f1_base:.4f}  Acc_adv={acc_adv:.4f}  "
-              f"F1_adv_after={f1_adv:.4f}  Recovery={recovery:.1f}%")
+        print(f"    {name:10s} | Clean: Acc={acc_clean:.4f} Pr={pr_clean:.4f} Rc={rc_clean:.4f} F1={f1_clean:.4f} | "
+              f"Adv Base: F1={f1_base:.4f} | Adv Robust: Acc={acc_adv:.4f} Pr={pr_adv:.4f} Rc={rc_adv:.4f} F1={f1_adv:.4f} | Recovery={recovery:.1f}%")
         rob_results.append({
             "model": name,
             "accuracy_clean": acc_clean, "precision_clean": pr_clean,
@@ -642,7 +656,6 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
     print("STEP 6 – Two-Tiered Defense Evaluation (Figure 4)")
     print("=" * 60)
 
-    from sklearn.metrics import accuracy_score
     pipeline_results = []
 
     for det_name, detector in detector_models.items():
@@ -688,17 +701,20 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
             pr_adv  = precision_score(y_adv_true, y_pred_adv, average="weighted", zero_division=0)
             rc_adv  = recall_score(y_adv_true, y_pred_adv, average="weighted", zero_division=0)
 
-            # Baseline : F1 without defense
-            f1_no_defense = f1_score(y_adv_true,
-                                     _predict(base_model, X_adv_test), average="weighted",
-                                     zero_division=0)
+            # Baseline : Metrics without defense
+            y_pred_no_def = _predict(base_model, X_adv_test)
+            acc_no_defense = accuracy_score(y_adv_true, y_pred_no_def)
+            pr_no_defense  = precision_score(y_adv_true, y_pred_no_def, average="weighted", zero_division=0)
+            rc_no_defense  = recall_score(y_adv_true, y_pred_no_def, average="weighted", zero_division=0)
+            f1_no_defense  = f1_score(y_adv_true, y_pred_no_def, average="weighted", zero_division=0)
+
             recovery = (f1_adv / f1_no_defense * 100) if f1_no_defense > 0 else 0
 
-            print(f"    Classifier={cls_name:10s} | "
-                  f"Acc_clean={acc_clean:.4f}  F1_clean={f1_clean:.4f}  "
-                  f"F1_adv_nodefense={f1_no_defense:.4f}  "
-                  f"Acc_adv={acc_adv:.4f}  F1_adv_defended={f1_adv:.4f}  "
-                  f"Recovery={recovery:.1f}%")
+            print(f"    Classifier={cls_name:10s}\n"
+                  f"      Clean      | Acc={acc_clean:.4f} Pr={pr_clean:.4f} Rc={rc_clean:.4f} F1={f1_clean:.4f}\n"
+                  f"      Adv NoDef  | Acc={acc_no_defense:.4f} Pr={pr_no_defense:.4f} Rc={rc_no_defense:.4f} F1={f1_no_defense:.4f}\n"
+                  f"      Adv Defend | Acc={acc_adv:.4f} Pr={pr_adv:.4f} Rc={rc_adv:.4f} F1={f1_adv:.4f}\n"
+                  f"      Recovery   | {recovery:.1f}%")
 
             pipeline_results.append({
                 "detector": det_name, "classifier": cls_name,
@@ -706,6 +722,9 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
                 "recall_clean":   rc_clean,   "f1_clean":        f1_clean,
                 "accuracy_adv":   acc_adv,    "precision_adv":   pr_adv,
                 "recall_adv":     rc_adv,
+                "accuracy_adv_no_defense": acc_no_defense,
+                "precision_adv_no_defense": pr_no_defense,
+                "recall_adv_no_defense": rc_no_defense,
                 "f1_adv_no_defense": f1_no_defense,
                 "f1_adv_defended":   f1_adv,
                 "recovery_pct":      recovery,
@@ -743,8 +762,24 @@ def evaluate(model, X_test, y_test, name, label_classes=None):
     
     per_class = {}
     if label_classes is not None:
+        cr_str = classification_report(y_test, y_pred, target_names=label_classes, zero_division=0)
         print(f"\n[Classification Report for {name}]")
-        print(classification_report(y_test, y_pred, target_names=label_classes, zero_division=0))
+        print(cr_str)
+        
+        with open(os.path.join(OUTPUT_PATH, f"classification_report_{name}.txt"), "w", encoding="utf-8") as f:
+            f.write(f"[Classification Report for {name}]\n")
+            f.write(cr_str)
+
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=label_classes, yticklabels=label_classes)
+        plt.title(f'Confusion Matrix - {name}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_PATH, f"confusion_matrix_{name}.png"))
+        plt.close()
         
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
         for i, cls in enumerate(label_classes):
@@ -754,8 +789,9 @@ def evaluate(model, X_test, y_test, name, label_classes=None):
             else:
                 per_class[cls] = {"precision": 0.0, "recall": 0.0, "f1": 0.0}
 
-    print(f"    {name:10s} | F1={f1:.4f}  Precision={pr:.4f}  Recall={rc:.4f}")
-    return {"model": name, "f1": f1, "precision": pr, "recall": rc, "per_class": per_class}
+    acc = accuracy_score(y_test, y_pred)
+    print(f"    {name:10s} | Acc={acc:.4f} F1={f1:.4f} Precision={pr:.4f} Recall={rc:.4f}")
+    return {"model": name, "accuracy": acc, "f1": f1, "precision": pr, "recall": rc, "per_class": per_class}
 
 
 # ─────────────────────────────────────────────
@@ -765,28 +801,50 @@ def evaluate(model, X_test, y_test, name, label_classes=None):
 def plot_figure_5(result, label_classes):
     """
     Figure 5: IoT Device Identification Scores in IoT IPFIX Home.
-    CORRECTION 2 : prend un seul résultat de modèle (dict) et génère une image par modèle.
+    Individual plot per model with paper-like annotations.
     """
     name = result.get("model", "Unknown")
-    if not result.get("per_class"):
+    metrics = result.get("per_class", {})
+    if not metrics:
         return
-
-    metrics = result["per_class"]
+        
     df_plot = pd.DataFrame(metrics).T
+    # Make sure order matches label_classes
+    df_plot = df_plot.reindex(label_classes).fillna(0)
 
-    plt.figure(figsize=(14, 6))
+    fig, ax = plt.subplots(figsize=(16, 6))
+    
     x = np.arange(len(label_classes))
     width = 0.25
 
-    plt.bar(x - width, df_plot["precision"] * 100, width, label='Precision')
-    plt.bar(x,          df_plot["recall"]    * 100, width, label='Recall')
-    plt.bar(x + width,  df_plot["f1"]        * 100, width, label='F1-Score')
+    bars1 = ax.bar(x - width, df_plot["precision"] * 100, width, label='Precision')
+    bars2 = ax.bar(x,          df_plot["recall"]    * 100, width, label='Recall')
+    bars3 = ax.bar(x + width,  df_plot["f1"]        * 100, width, label='F1-Score')
 
-    plt.xlabel('IoT Devices')
-    plt.ylabel('Score (%)')
-    plt.title(f'Figure 5: IoT Device Identification Scores in IoT IPFIX Home ({name})')
-    plt.xticks(x, label_classes, rotation=45, ha="right")
-    plt.legend()
+    # Add text labels above bars as seen in the specified image
+    for bars in [bars1, bars2, bars3]:
+        for bar in bars:
+            height = bar.get_height()
+            if height > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2.,
+                        height + 1,
+                        f"{height:.1f}%",
+                        ha='center', va='bottom', rotation=90, fontsize=8)
+
+    ax.set_ylim(40, 110) # Set reasonable y limit to leave space for labels
+    ax.set_ylabel('Score (%)')
+    ax.set_title(name, pad=20)
+    ax.set_xticks(x)
+    ax.set_xticklabels(label_classes, rotation=45, ha="right")
+    
+    # remove top and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    # horizontal grid lines
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    ax.legend(loc='upper left', bbox_to_anchor=(0.0, 1.15), ncol=3)
+
     plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_PATH, f'Figure_5_Device_Identification_{name}.png'))
     plt.close()
