@@ -616,7 +616,7 @@ def train_robust_classifiers(base_models, X_train, y_train,
         rc_adv  = recall_score(y_test_sample, y_pred_adv, average="weighted", zero_division=0)
 
         f1_base  = f1_score(y_test_sample, y_pred_base, average="weighted", zero_division=0)
-        recovery = (f1_adv / f1_clean * 100) if f1_clean > 0 else 0
+        recovery = (f1_adv / f1_clean * 100) if f1_clean > 0 else 0  # recovery vs clean baseline
 
         print(f"    {name:10s} | Clean: Acc={acc_clean:.4f} Pr={pr_clean:.4f} Rc={rc_clean:.4f} F1={f1_clean:.4f} | "
               f"Adv Base: F1={f1_base:.4f} | Adv Robust: Acc={acc_adv:.4f} Pr={pr_adv:.4f} Rc={rc_adv:.4f} F1={f1_adv:.4f} | Recovery={recovery:.1f}%")
@@ -708,7 +708,7 @@ def two_tiered_defense_evaluation(base_models, detector_models, robust_models,
             rc_no_defense  = recall_score(y_adv_true, y_pred_no_def, average="weighted", zero_division=0)
             f1_no_defense  = f1_score(y_adv_true, y_pred_no_def, average="weighted", zero_division=0)
 
-            recovery = (f1_adv / f1_no_defense * 100) if f1_no_defense > 0 else 0
+            recovery = (f1_adv / f1_clean * 100) if f1_clean > 0 else 0  # FIXED: recovery vs clean, not vs no_defense
 
             print(f"    Classifier={cls_name:10s}\n"
                   f"      Clean      | Acc={acc_clean:.4f} Pr={pr_clean:.4f} Rc={rc_clean:.4f} F1={f1_clean:.4f}\n"
